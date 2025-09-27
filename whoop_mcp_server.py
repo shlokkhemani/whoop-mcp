@@ -43,17 +43,19 @@ class WhoopTokenVerifier(TokenVerifier):
         self,
         cache_ttl_s: int = 300,
         required_scopes: Optional[list[str]] = None,
+        client_id_hint: Optional[str] = None,
     ) -> None:
         super().__init__(required_scopes=required_scopes)
         self._cache_ttl_s = cache_ttl_s
         self._cache: dict[str, Tuple[float, dict[str, Any]]] = {}
+        self._client_id_hint = client_id_hint or os.getenv("WHOOP_CLIENT_ID") or "whoop"
 
     async def verify_token(self, token: str) -> Optional[AccessToken]:
         now = time.time()
         if token in self._cache:
             expires_at, _claims = self._cache[token]
             if now < expires_at:
-                return AccessToken(token=token, scopes=self.required_scopes)
+                return AccessToken(token=token, client_id=self._client_id_hint, scopes=self.required_scopes)
 
         url = f"{WHOOP_BASE}/v2/user/profile/basic"
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -64,7 +66,7 @@ class WhoopTokenVerifier(TokenVerifier):
 
         data = response.json() if response.content else {}
         self._cache[token] = (now + self._cache_ttl_s, data)
-        return AccessToken(token=token, scopes=self.required_scopes)
+        return AccessToken(token=token, client_id=self._client_id_hint, scopes=self.required_scopes)
 
 
 auth = OAuthProxy(
@@ -74,7 +76,10 @@ auth = OAuthProxy(
     upstream_client_secret=os.environ["WHOOP_CLIENT_SECRET"],
     token_endpoint_auth_method="client_secret_post",
     forward_pkce=True,
-    token_verifier=WhoopTokenVerifier(required_scopes=REQUIRED_SCOPES),
+    token_verifier=WhoopTokenVerifier(
+        required_scopes=REQUIRED_SCOPES,
+        client_id_hint=os.environ.get("WHOOP_CLIENT_ID"),
+    ),
     valid_scopes=REQUIRED_SCOPES,
     base_url=os.environ["PUBLIC_BASE_URL"],
     redirect_path=os.getenv("OAUTH_REDIRECT_PATH", "/auth/callback"),
