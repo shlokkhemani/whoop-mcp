@@ -33,6 +33,7 @@ REQUIRED_SCOPES = [
     "read:cycles",
     "read:sleep",
     "read:workout",
+    "read:recovery"
 ]
 
 
