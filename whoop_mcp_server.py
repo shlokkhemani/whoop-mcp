@@ -1,21 +1,84 @@
 """WHOOP MCP server with balanced daily insights and flexible querying.
 
-Provides both quick daily readiness checks and detailed historical analysis.
+Adds an OAuth proxy so clients authenticate via WHOOP's Authorization Code flow instead of pasting bearer tokens.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Literal, Annotated
+import time
+from typing import Any, Literal, Annotated, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from pydantic import Field
+from dotenv import load_dotenv
 
 from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_request
+from fastmcp.server.auth import OAuthProxy
+from fastmcp.server.auth.auth import TokenVerifier, AccessToken
+from fastmcp.server.dependencies import get_access_token, get_http_request
+
+# Load environment variables from .env file
+load_dotenv()
 
 WHOOP_BASE = os.getenv("WHOOP_API_BASE", "https://api.prod.whoop.com/developer")
+WHOOP_OAUTH_AUTHZ = "https://api.prod.whoop.com/oauth/oauth2/auth"
+WHOOP_OAUTH_TOKEN = "https://api.prod.whoop.com/oauth/oauth2/token"
+
+REQUIRED_SCOPES = [
+    "offline",
+    "read:profile",
+    "read:body_measurement",
+    "read:cycles",
+    "read:sleep",
+    "read:workout",
+]
+
+
+class WhoopTokenVerifier(TokenVerifier):
+    """Verifies WHOOP access tokens via a lightweight profile fetch with short-lived caching."""
+
+    def __init__(
+        self,
+        cache_ttl_s: int = 300,
+        required_scopes: Optional[list[str]] = None,
+    ) -> None:
+        super().__init__(required_scopes=required_scopes)
+        self._cache_ttl_s = cache_ttl_s
+        self._cache: dict[str, Tuple[float, dict[str, Any]]] = {}
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        now = time.time()
+        if token in self._cache:
+            expires_at, _claims = self._cache[token]
+            if now < expires_at:
+                return AccessToken(token=token, scopes=self.required_scopes)
+
+        url = f"{WHOOP_BASE}/v2/user/profile/basic"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json() if response.content else {}
+        self._cache[token] = (now + self._cache_ttl_s, data)
+        return AccessToken(token=token, scopes=self.required_scopes)
+
+
+auth = OAuthProxy(
+    upstream_authorization_endpoint=WHOOP_OAUTH_AUTHZ,
+    upstream_token_endpoint=WHOOP_OAUTH_TOKEN,
+    upstream_client_id=os.environ["WHOOP_CLIENT_ID"],
+    upstream_client_secret=os.environ["WHOOP_CLIENT_SECRET"],
+    token_endpoint_auth_method="client_secret_post",
+    forward_pkce=True,
+    token_verifier=WhoopTokenVerifier(required_scopes=REQUIRED_SCOPES),
+    valid_scopes=REQUIRED_SCOPES,
+    base_url=os.environ["PUBLIC_BASE_URL"],
+    redirect_path=os.getenv("OAUTH_REDIRECT_PATH", "/auth/callback"),
+)
 
 
 class WhoopClient:
@@ -50,7 +113,13 @@ class WhoopClient:
         await self._client.aclose()
 
 
-def _resolve_bearer_token() -> str:
+def _bearer_for_upstream() -> str:
+    """Prefer the validated OAuth token, fall back to raw Authorization header for dev paths."""
+
+    token = get_access_token()
+    if token and token.token:
+        return token.token
+
     request = get_http_request()
     auth_header = request.headers.get("authorization")
     if not auth_header:
@@ -65,11 +134,12 @@ mcp = FastMCP(
         "All timestamps are UTC; convert in the client based on the user's timezone. "
         "Use get_daily_update for a daily update and get_activities for windowed records."
     ),
+    auth=auth,
 )
 
 
 async def _dispatch_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    token = _resolve_bearer_token()
+    token = _bearer_for_upstream()
     client = WhoopClient(token)
     try:
         return await client.get(path, params=params)
