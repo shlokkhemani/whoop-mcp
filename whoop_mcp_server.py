@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from fastmcp import FastMCP
+from fastmcp.http import current_request
 
 WHOOP_BASE = os.getenv("WHOOP_API_BASE", "https://api.prod.whoop.com/developer")
 
@@ -60,31 +61,18 @@ class WhoopClient:
 
 
 def _resolve_bearer_token() -> str:
-    """Extract bearer token from Authorization header.
-    This function should be called within a tool that has access to the request context.
-    For now, we'll use a simple approach - in a real implementation, you'd want to
-    use FastMCP's built-in auth system or pass the token as a parameter."""
-    # For now, we'll read from the stored tokens file
-    # In a production setup, you'd want to use FastMCP's auth system
-    import json
-    import os
-    
-    tokens_file = "whoop_tokens.json"
-    if os.path.exists(tokens_file):
-        with open(tokens_file, 'r') as f:
-            tokens = json.load(f)
-            return tokens.get('access_token', '')
-    
-    raise ValueError("No valid access token found. Please authenticate first using the OAuth server.")
+    request = current_request.get()
+    auth_header = request.headers["authorization"]
+    return auth_header.split(" ", 1)[1]
 
 
 mcp = FastMCP(
     name="whoop-mcp",
     instructions=(
         "This server surfaces WHOOP v2 endpoints as MCP tools. "
+        "All timestamps returned by WHOOP are in UTC format. Please convert to local time before displaying to the user."
         "Use list_* tools with start/end windows, limit<=25, and next_token to paginate. "
-        "For details, use get_* tools by id. "
-        f"All timestamps returned by WHOOP are in UTC format. Please convert to local time before displaying to the user."
+        "For details, use get_* tools by id."
     ),
 )
 
@@ -177,5 +165,5 @@ async def get_workout(params: ByIdParams) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Use port 9000 to avoid conflicts with other services
+    # Run over HTTP so external clients can connect.
     mcp.run(transport="http", host="0.0.0.0", port=int(os.getenv("PORT", "9000")))
