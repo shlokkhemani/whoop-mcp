@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from fastmcp import FastMCP
-from fastmcp.http import current_request
+from fastmcp.server.dependencies import get_http_request
 
 WHOOP_BASE = os.getenv("WHOOP_API_BASE", "https://api.prod.whoop.com/developer")
 
@@ -61,8 +61,10 @@ class WhoopClient:
 
 
 def _resolve_bearer_token() -> str:
-    request = current_request.get()
-    auth_header = request.headers["authorization"]
+    request = get_http_request()
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        raise RuntimeError("Authorization header missing from request.")
     return auth_header.split(" ", 1)[1]
 
 
