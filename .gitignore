@@ -28,6 +28,9 @@ wheels/
 # Token storage
 whoop_tokens.json
 
+# OAuth server
+whoop_oauth_server.py
+
 # IDE
 .vscode/
 .idea/

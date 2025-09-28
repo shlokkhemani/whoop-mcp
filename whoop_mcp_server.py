@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import os
 import time
+from functools import partial
 from typing import Any, Literal, Annotated, Optional, Tuple
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import httpx
 from pydantic import Field
@@ -18,6 +19,7 @@ from fastmcp import FastMCP
 from fastmcp.server.auth import OAuthProxy
 from fastmcp.server.auth.auth import TokenVerifier, AccessToken
 from fastmcp.server.dependencies import get_access_token, get_http_request
+from utils import collect_paginated, days_ago, isoformat_utc, start_of_day
 
 # Load environment variables from .env file
 load_dotenv()
@@ -153,48 +155,20 @@ async def _dispatch_get(path: str, params: dict[str, Any] | None = None) -> dict
         await client.aclose()
 
 
-# ---------- Utility functions ----------
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _days_ago(days: int) -> str:
-    """Return ISO timestamp for N days ago from now."""
-    dt = datetime.now(timezone.utc) - timedelta(days=days)
-    return _iso(dt)
-
-
-def _start_of_day(days_ago: int = 0) -> str:
-    """Return ISO timestamp for start of day (UTC midnight) N days ago."""
-    dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
-    start = datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=timezone.utc)
-    return _iso(start)
-
-
-async def _collect_all(path: str, params: dict[str, Any], max_pages: int = 10) -> list[dict[str, Any]]:
-    """Collect all paginated results up to max_pages."""
-    records: list[dict[str, Any]] = []
-    next_token: str | None = None
-    for _ in range(max_pages):
-        qp = dict(params)
-        if next_token:
-            qp["next_token"] = next_token
-        data = await _dispatch_get(path, qp)
-        records.extend(data.get("records", []))
-        next_token = data.get("next_token")
-        if not next_token:
-            break
-    return records
-
-
 # ---------- Main Tools ----------
+
+@mcp.tool
+async def get_user_profile() -> dict[str, Any]:
+    """Return WHOOP basic user profile (requires read:profile scope)."""
+    return await _dispatch_get("/v2/user/profile/basic")
+
 
 @mcp.tool
 async def get_daily_update() -> dict[str, Any]:
     """Return raw records for latest recovery, last completed sleep, recent cycles, and today's workouts (UTC)."""
     
     # Get latest recovery
-    now = _iso(datetime.now(timezone.utc))
+    now = isoformat_utc(datetime.now(timezone.utc))
     recovery_data = await _dispatch_get("/v2/recovery", {"limit": 1, "end": now})
     recovery = (recovery_data.get("records") or [{}])[0]
     
@@ -203,12 +177,12 @@ async def get_daily_update() -> dict[str, Any]:
     sleep = (sleep_data.get("records") or [{}])[0]
     
     # Get recent cycles (last 2 days)
-    cycles_start = _days_ago(2)
+    cycles_start = days_ago(2)
     cycles_data = await _dispatch_get("/v2/cycle", {"start": cycles_start, "end": now, "limit": 10})
     cycles = cycles_data.get("records", [])
     
     # Get today's workouts
-    today_start = _start_of_day(0)
+    today_start = start_of_day()
     workouts_data = await _dispatch_get("/v2/activity/workout", {"start": today_start, "end": now, "limit": 10})
     workouts = workouts_data.get("records", [])
     
@@ -252,12 +226,12 @@ async def get_activities(
     if start_date:
         start = start_date if "T" in start_date else f"{start_date}T00:00:00Z"
     else:
-        start = _days_ago(days_back or 7)
+        start = days_ago(days_back or 7)
     
     if end_date:
         end = end_date if "T" in end_date else f"{end_date}T23:59:59Z"
     else:
-        end = _iso(datetime.now(timezone.utc))
+        end = isoformat_utc(datetime.now(timezone.utc))
     
     result: dict[str, Any] = {
         "window": {"start": start, "end": end}
@@ -265,19 +239,31 @@ async def get_activities(
     
     # Fetch requested data
     if activity_type in ("all", "sleep"):
-        sleeps = await _collect_all("/v2/activity/sleep", {"start": start, "end": end, "limit": 25})
+        sleeps = await collect_paginated(
+            partial(_dispatch_get, "/v2/activity/sleep"),
+            {"start": start, "end": end, "limit": 25},
+        )
         result["sleep"] = sleeps
     
     if activity_type in ("all", "workouts"):
-        workouts = await _collect_all("/v2/activity/workout", {"start": start, "end": end, "limit": 25})
+        workouts = await collect_paginated(
+            partial(_dispatch_get, "/v2/activity/workout"),
+            {"start": start, "end": end, "limit": 25},
+        )
         result["workouts"] = workouts
     
     if activity_type in ("all", "recovery"):
-        recoveries = await _collect_all("/v2/recovery", {"start": start, "end": end, "limit": 25})
+        recoveries = await collect_paginated(
+            partial(_dispatch_get, "/v2/recovery"),
+            {"start": start, "end": end, "limit": 25},
+        )
         result["recovery"] = recoveries
     
     if activity_type in ("all", "cycles"):
-        cycles = await _collect_all("/v2/cycle", {"start": start, "end": end, "limit": 25})
+        cycles = await collect_paginated(
+            partial(_dispatch_get, "/v2/cycle"),
+            {"start": start, "end": end, "limit": 25},
+        )
         result["cycles"] = cycles
     
     return result
@@ -299,16 +285,16 @@ async def get_trends(
     if period == "week":
         # Current week (Monday to now)
         days_since_monday = now.weekday()
-        current_start = _start_of_day(days_since_monday)
-        current_end = _iso(now)
+        current_start = start_of_day(days_since_monday)
+        current_end = isoformat_utc(now)
         
         # Previous week (same days)
-        prev_start = _start_of_day(days_since_monday + 7)
-        prev_end = _days_ago(7)
+        prev_start = start_of_day(days_since_monday + 7)
+        prev_end = days_ago(7)
     else:  # month
         # Current month so far
         current_start = f"{now.year}-{now.month:02d}-01T00:00:00Z"
-        current_end = _iso(now)
+        current_end = isoformat_utc(now)
         
         # Same days of previous month
         prev_month = now.month - 1 if now.month > 1 else 12
@@ -317,15 +303,39 @@ async def get_trends(
         prev_end = f"{prev_year}-{prev_month:02d}-{now.day:02d}T23:59:59Z"
     
     # Fetch data for both periods
-    current_recovery = await _collect_all("/v2/recovery", {"start": current_start, "end": current_end, "limit": 25})
-    current_sleep = await _collect_all("/v2/activity/sleep", {"start": current_start, "end": current_end, "limit": 25})
-    current_cycles = await _collect_all("/v2/cycle", {"start": current_start, "end": current_end, "limit": 25})
-    current_workouts = await _collect_all("/v2/activity/workout", {"start": current_start, "end": current_end, "limit": 25})
-    
-    previous_recovery = await _collect_all("/v2/recovery", {"start": prev_start, "end": prev_end, "limit": 25})
-    previous_sleep = await _collect_all("/v2/activity/sleep", {"start": prev_start, "end": prev_end, "limit": 25})
-    previous_cycles = await _collect_all("/v2/cycle", {"start": prev_start, "end": prev_end, "limit": 25})
-    previous_workouts = await _collect_all("/v2/activity/workout", {"start": prev_start, "end": prev_end, "limit": 25})
+    current_recovery = await collect_paginated(
+        partial(_dispatch_get, "/v2/recovery"),
+        {"start": current_start, "end": current_end, "limit": 25},
+    )
+    current_sleep = await collect_paginated(
+        partial(_dispatch_get, "/v2/activity/sleep"),
+        {"start": current_start, "end": current_end, "limit": 25},
+    )
+    current_cycles = await collect_paginated(
+        partial(_dispatch_get, "/v2/cycle"),
+        {"start": current_start, "end": current_end, "limit": 25},
+    )
+    current_workouts = await collect_paginated(
+        partial(_dispatch_get, "/v2/activity/workout"),
+        {"start": current_start, "end": current_end, "limit": 25},
+    )
+
+    previous_recovery = await collect_paginated(
+        partial(_dispatch_get, "/v2/recovery"),
+        {"start": prev_start, "end": prev_end, "limit": 25},
+    )
+    previous_sleep = await collect_paginated(
+        partial(_dispatch_get, "/v2/activity/sleep"),
+        {"start": prev_start, "end": prev_end, "limit": 25},
+    )
+    previous_cycles = await collect_paginated(
+        partial(_dispatch_get, "/v2/cycle"),
+        {"start": prev_start, "end": prev_end, "limit": 25},
+    )
+    previous_workouts = await collect_paginated(
+        partial(_dispatch_get, "/v2/activity/workout"),
+        {"start": prev_start, "end": prev_end, "limit": 25},
+    )
     
     return {
         "period": period,

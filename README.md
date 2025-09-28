@@ -1,199 +1,42 @@
-# WHOOP OAuth Server
+# WHOOP MCP Server
 
-A Python Flask server that handles the complete WHOOP OAuth 2.0 flow and stores authenticated user bearer tokens locally.
+FastMCP server that wraps WHOOP's OAuth flow and exposes a handful of Poke-ready tools (`get_daily_update`, `get_activities`, `get_trends`, `get_user_profile`). Use it as a reference implementation or deploy it as-is for your own account.
 
-## Features
+**Want the full story?** The accompanying blog post on building Poke integrations covers architecture, MCP client behavior, and tool design philosophy in detail.
 
-- Complete OAuth 2.0 authorization flow
-- Automatic token exchange and storage
-- Token refresh functionality
-- Web interface for easy interaction
-- Local token storage in JSON format
-- API testing capabilities
+## What you need
+- Python 3.10+
+- WHOOP developer app with `offline`, `read:profile`, `read:body_measurement`, `read:cycles`, `read:recovery`, `read:sleep`, `read:workout`
+- Redirect URI registered in WHOOP: `http://localhost:9000/auth/callback` (add your hosted URL later if you deploy)
 
-## Setup
-
-### Quick Setup (Recommended)
-
-```bash
-# Run the setup script
-./setup.sh
-
-# Edit your credentials
-nano .env  # or use your preferred editor
-
-# Start the server
-./run.sh
-```
-
-### Manual Setup
-
-#### 1. Create Virtual Environment
-
+## Setup (local)
 ```bash
 python3 -m venv venv
 source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt fastmcp httpx
+cp .env.example .env
 ```
+Fill in `.env` with your WHOOP client ID, secret, and the base URL (`http://localhost:9000` for local work). Never commit this file.
 
-#### 2. Install Dependencies
-
+## Run & authorize
 ```bash
-pip install -r requirements.txt
+python whoop_mcp_server.py
 ```
+1. Open `http://localhost:9000/.well-known/oauth-authorization-server` to confirm the server is up.
+2. Connect it from Poke (or FastMCP Inspector via `npx --yes fastmcp inspector --server http://localhost:9000`).
+3. Sign into WHOOP when prompted; tokens refresh automatically after that.
 
-#### 3. Configure Client Credentials
 
-You need to obtain your WHOOP client credentials from the WHOOP Developer Portal:
+## Host on FastMCP Cloud
+- Push this repo to GitHub (omit local helpers like `whoop_oauth_server.py`).
+- In [FastMCP Cloud](https://gofastmcp.com/), connect your Git account and select the repo.
+- Set the entry point to `whoop_mcp_server.py` in the deployment settings.
+- Add required environment variables (`WHOOP_CLIENT_ID`, `WHOOP_CLIENT_SECRET`, `PUBLIC_BASE_URL`, `OAUTH_REDIRECT_PATH`) in the cloud dashboard.
+- Update the WHOOP developer app with the FastMCP callback URL (`https://<your-fastmcp-subdomain>/auth/callback`).
+- Redeploy after editing tool code or scopes; FastMCP Cloud handles token storage per environment.
 
-1. Go to [developer.whoop.com](https://developer.whoop.com)
-2. Create a new application
-3. Set redirect URI to: `http://localhost:5000/callback`
-4. Note your `client_id` and `client_secret`
-
-#### 4. Set Environment Variables
-
-Create a `.env` file in the project directory:
-
-```bash
-cp config.env.example .env
-```
-
-Then edit `.env` with your actual credentials:
-
-```
-WHOOP_CLIENT_ID=your_actual_client_id
-WHOOP_CLIENT_SECRET=your_actual_client_secret
-```
-
-## Usage
-
-### Using Scripts (Recommended)
-
-```bash
-# Start the server
-./run.sh
-```
-
-### Manual Start
-
-```bash
-# Activate virtual environment
-source venv/bin/activate
-
-# Start the server
-python whoop_oauth_server.py
-```
-
-The server will start at `http://localhost:8080`
-
-### OAuth Flow
-
-1. **Open the web interface**: Navigate to `http://localhost:8080`
-2. **Start authentication**: Click "Start WHOOP Authentication"
-3. **Authorize**: You'll be redirected to WHOOP's authorization page
-4. **Login and consent**: Log in to your WHOOP account and grant permissions
-5. **Automatic callback**: The server will handle the callback and store your tokens
-
-### API Endpoints
-
-- `GET /` - Main web interface
-- `GET /authorize` - Start OAuth flow
-- `GET /callback` - OAuth callback handler (automatic)
-- `GET /tokens` - View stored tokens (JSON)
-- `POST /refresh_token` - Refresh access token
-- `POST /test_api` - Test API call with current token
-- `POST /clear_tokens` - Clear stored tokens
-
-### Using the Stored Tokens
-
-Tokens are stored in `whoop_tokens.json` in the project directory. The file contains:
-
-```json
-{
-  "access_token": "eyJhbGciOi...",
-  "token_type": "bearer",
-  "expires_in": 3600,
-  "refresh_token": "def50200...",
-  "scope": "offline read:profile read:sleep ...",
-  "expires_at": "2024-01-01T12:00:00"
-}
-```
-
-### Making API Calls
-
-You can use the stored access token to make API calls to WHOOP:
-
-```python
-import requests
-import json
-
-# Load tokens
-with open('whoop_tokens.json', 'r') as f:
-    tokens = json.load(f)
-
-# Make API call
-headers = {'Authorization': f"Bearer {tokens['access_token']}"}
-response = requests.get('https://api.prod.whoop.com/developer/v2/user/profile/basic', headers=headers)
-print(response.json())
-```
-
-## OAuth Scopes
-
-The server requests the following scopes:
-- `offline` - Allows refresh token usage
-- `read:profile` - Read user profile information
-- `read:body_measurement` - Read body measurement data
-- `read:cycles` - Read recovery and strain cycles
-- `read:sleep` - Read sleep data
-- `read:workout` - Read workout data
-
-## Security Notes
-
-- Tokens are stored locally in plain text JSON
-- The server runs on localhost only by default
-- State parameter is used for CSRF protection
-- Tokens include expiration information
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"Client credentials not configured"**
-   - Make sure you've set `WHOOP_CLIENT_ID` and `WHOOP_CLIENT_SECRET`
-   - Check that your `.env` file is in the correct location
-
-2. **"OAuth error" during authorization**
-   - Verify your redirect URI matches exactly: `http://localhost:5000/callback`
-   - Check that your client credentials are correct
-
-3. **"Failed to exchange code for tokens"**
-   - Ensure your client secret is correct
-   - Check that the authorization code hasn't expired
-
-4. **"API call failed"**
-   - Your access token may have expired - try refreshing
-   - Verify the token has the required scopes
-
-### Debug Mode
-
-The server runs in debug mode by default. For production use, set `debug=False` in the `app.run()` call.
-
-## Example WHOOP API Calls
-
-Once you have a valid access token, you can make calls to various WHOOP API endpoints:
-
-```python
-# User profile
-GET https://api.prod.whoop.com/developer/v2/user/profile/basic
-
-# Sleep data
-GET https://api.prod.whoop.com/developer/v2/activity/sleep
-
-# Workout data  
-GET https://api.prod.whoop.com/developer/v2/activity/workout
-
-# Recovery data
-GET https://api.prod.whoop.com/developer/v2/cycle/recovery
-```
-
-All requests require the `Authorization: Bearer YOUR_ACCESS_TOKEN` header.
+## Deploying later?
+- Point `PUBLIC_BASE_URL` at your HTTPS origin and add the matching redirect in the WHOOP console.
+- Keep `whoop_tokens.json` and your `.env` outside source control.
+- Follow the guidance in the blog post for tool evolution, rate limiting, and MCP best practices.
